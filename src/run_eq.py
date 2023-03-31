@@ -21,8 +21,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 NUM_POINTS = 0
-NUM_EPOCHS = 250
-TRAIN_MODEL = True
+NUM_EPOCHS = 100
+TRAIN_MODEL = False
 Z_DIM = 128
 
 def imshow(fig):
