@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from matplotlib import pyplot as plt
+import matplotlib.colors
 
 from tqdm.auto import tqdm
 
@@ -156,9 +158,20 @@ b_i: [batch, seq_len]
 
 return: scalar
 """
-def ll_no_events(w_i, b_i, tn_ti, t_ti):
-    return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+# def ll_no_events(w_i, b_i, tn_ti, t_ti):
+#    return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
 
+def ll_no_events(w_i, b_i, tn_ti, t_ti):
+    # return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+    z_safe = torch.sum(safe_division_masked(w_i, b_i) * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+    return z_safe
+
+    # safe division using pytorch.masked
+def safe_division_masked(x, y, eps=1e-12):
+    mask = torch.abs(y) > eps
+    y = y.masked_fill_(~mask, eps)
+    return torch.div(x,y)
+    #return x/y
 
 def log_ft(t_ti, tn_ti, w_i, b_i):
     return ll_no_events(w_i, b_i, tn_ti, t_ti) + torch.log(t_intensity(w_i, b_i, t_ti))
@@ -255,7 +268,7 @@ class DeepSTPP(nn.Module):
             nelbo = - (sll.mean() + tll.mean())
 
         return nelbo, sll, tll
-   
+    
     
     def forward(self, st_x):        
         # Encode history locations and times
@@ -319,12 +332,18 @@ def calc_lamb(model, test_loader, config, device, scales=np.ones(3), biases=np.z
 
         if not torch.any(mask):
             break
-        
+
+
     # Stack the first sequence
-    st_x = torch.cat(st_xs, 0).cpu()
-    st_y = torch.cat(st_ys, 0).cpu()
-    st_x_cum = torch.cat(st_x_cums, 0).cpu()
-    st_y_cum = torch.cat(st_y_cums, 0).cpu()
+    # st_x = torch.cat(st_xs, 0).cpu()
+    # st_y = torch.cat(st_ys, 0).cpu()
+    # st_x_cum = torch.cat(st_x_cums, 0).cpu()
+    # st_y_cum = torch.cat(st_y_cums, 0).cpu()
+    st_x = st_xs[0].cpu()
+    st_y = st_ys[0].cpu()
+    st_x_cum = st_x_cums[0].cpu()
+    st_y_cum = st_y_cums[0].cpu()
+
     if total_time is None:
         total_time = st_y_cum[-1, -1, -1]
 
@@ -401,6 +420,23 @@ def calc_lamb(model, test_loader, config, device, scales=np.ones(3), biases=np.z
         #print('-----------')
 
         lamb = (lamb_s * lamb_t).view(x_nstep, y_nstep)
+        
+        # show heatmap of lamb transposed
+        # CHANGE EXTENT FOR SOCCER DATA [0, 105, 0, 68]
+        plt.imshow(lamb.numpy().T, origin='lower',extent=[0, 1, 0,1])
+        
+        # Plot individual events for DEBUGGING 
+        plt.scatter(st_y[i, :, 0], st_y[i, :, 1], c='white', marker='x')
+        plt.scatter(st_x_[0, -1, 0], st_x_[0, -1, 1], c='black', marker='x')
+
+        # USE FOR SOCCER DATA
+        # plt.scatter(st_y_cum[i, :, 0], st_y_cum[i, :, 1], c='white', marker='x')
+        # Add black cross at last input st_x_cum[i,:,:2]
+        # plt.scatter(st_x_cum[i, -1, 0], st_x_cum[i, -1, 1], c='black', marker='x')
+
+
+        # Clear plot
+        plt.clf()
         lambs.append(lamb.numpy())
 
     x_range = x_range.numpy() * scales[0] + biases[0]

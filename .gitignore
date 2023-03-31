@@ -89,3 +89,10 @@ target/
 .mypy_cache/
 
 models
+
+*.log
+*.mod
+processed/
+
+*.gif
+*.mp4

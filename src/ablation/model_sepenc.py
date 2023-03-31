@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from matplotlib import pyplot as plt
 
 from tqdm.auto import tqdm
 
@@ -28,12 +29,13 @@ class PositionalEncoding(nn.Module):
         self.max_len = max_len
 
     def forward(self, x, t):
-        pe = torch.zeros(self.max_len, self.d_model).cuda()
         
-        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model)).cuda()
+        pe = torch.zeros(self.max_len, self.d_model)#.cuda()
+        
+        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model))#.cuda()
         
         t = t.unsqueeze(-1)
-        pe = torch.zeros(*t.shape[:2], self.d_model).cuda()
+        pe = torch.zeros(*t.shape[:2], self.d_model)#.cuda()
         pe[..., 0::2] = torch.sin(t * div_term)
         pe[..., 1::2] = torch.cos(t * div_term)
         
@@ -151,8 +153,19 @@ b_i: [batch, seq_len]
 
 return: scalar
 """
+# def ll_no_events(w_i, b_i, tn_ti, t_ti):
+#     return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+
 def ll_no_events(w_i, b_i, tn_ti, t_ti):
-    return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+    # return torch.sum(w_i / b_i * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+    z_safe = torch.sum(safe_division_masked(w_i, b_i) * (torch.exp(-b_i * t_ti) - torch.exp(-b_i * tn_ti)), -1)
+    return z_safe
+
+    # safe division using pytorch.masked
+def safe_division_masked(x, y, eps=1e-12):
+    mask = torch.abs(y) > eps
+    y = y.masked_fill_(~mask, eps)
+    return torch.div(x,y)
 
 
 def log_ft(t_ti, tn_ti, w_i, b_i):
@@ -176,16 +189,24 @@ def t_intensity(w_i, b_i, t_ti):
     lamb_t = torch.sum(v_i, -1)
     return lamb_t
 
-def s_intensity(w_i, b_i, t_ti, s_diff, inv_var):
-    v_i = w_i * torch.exp(-b_i * t_ti)
-    v_i = v_i / torch.sum(v_i, -1).unsqueeze(-1) # normalize
+# def s_intensity(w_i, b_i, t_ti, s_diff, inv_var):
+#     # Make b_i = 1 to fix temporal intensity
+#     b_i = torch.ones_like(w_i)
+#     v_i = w_i * torch.exp(-b_i * t_ti)
+#     v_i = v_i / torch.sum(v_i, -1).unsqueeze(-1) # normalize
+#     g2 = torch.sum(s_diff * inv_var * s_diff, -1)
+#     g2 = torch.sqrt(torch.prod(inv_var, -1)) * torch.exp(-0.5*g2)/(2*np.pi)
+#     f_s_cond_t = torch.sum(g2 * v_i, -1)
+#     return f_s_cond_t
+
+def s_intensity(w_i, s_diff, inv_var):
     g2 = torch.sum(s_diff * inv_var * s_diff, -1)
     g2 = torch.sqrt(torch.prod(inv_var, -1)) * torch.exp(-0.5*g2)/(2*np.pi)
-    f_s_cond_t = torch.sum(g2 * v_i, -1)
+    f_s_cond_t = torch.sum(g2, -1)
     return f_s_cond_t
 
 def intensity(w_i, b_i, t_ti, s_diff, inv_var):
-    return t_intensity(w_i, b_i, t_ti) * s_intensity(w_i, b_i, t_ti, s_diff, inv_var)
+    return t_intensity(w_i, b_i, t_ti) * s_intensity(w_i, s_diff, inv_var)
 
 
 
@@ -241,19 +262,23 @@ class DeepSTPP(nn.Module):
         [qm_w, qv_w, qm_b, qv_b, qm_s, qv_s], w_i, b_i, inv_var = self(st_x)
             
         # Calculate likelihood
-        sll = torch.log(s_intensity(w_i, b_i, t_ti, s_diff, inv_var))
-        tll = log_ft(t_ti, tn_ti, w_i, b_i)
+        sll = torch.log(s_intensity(w_i, s_diff, inv_var))
+        # Stop time kernel (spatial problem) -> Time kernel = 1.0
+        tll = torch.log(t_intensity(w_i, b_i, t_ti))
+        # tll = torch.ones_like(tll)
+        # tll = log_ft(t_ti, tn_ti, w_i, b_i)
         
         # KL Divergence
         if self.config.sample:
             kl = kl_normal(qm_w, qv_w, *self.z_prior).mean() + \
-            kl_normal(qm_b, qv_b, *self.z_prior).mean() + \
             kl_normal(qm_s, qv_s, *self.z_prior).mean() 
-            nelbo = kl - self.config.beta * (sll.mean() + tll.mean())
+            #kl_normal(qm_b, qv_b, *self.z_prior).mean() + \
+            
+            nelbo = kl - self.config.beta * sll.mean() #+ tll.mean())
         else:
-            nelbo = - (sll.mean() + tll.mean())
+            nelbo = - (sll.mean()) #+ tll.mean())
 
-        return nelbo, sll, tll
+        return nelbo, sll #, tll
    
     
     def forward(self, st_x):
@@ -381,31 +406,48 @@ def calc_lamb(model, test_loader, config, device, scales=np.ones(3), biases=np.z
         b_i_ = b_i[i:i+1]
         inv_var_ = inv_var[i:i+1]
 
-        t_ = t - st_x_cum[i:i+1, -1, -1] # time since lastest event
-        t_ = (t_ - biases[-1]) / scales[-1]
+        # t_ = t - st_x_cum[i:i+1, -1, -1] # time since lastest event
+        # t_ = (t_ - biases[-1]) / scales[-1]
 
         # Calculate temporal intensity
-        t_cum = torch.cumsum(st_x_[..., -1], -1)
-        tn_ti = t_cum[..., -1:] - t_cum # t_n - t_i
-        tn_ti = torch.cat((tn_ti, torch.zeros(1, config.num_points)), -1)
-        t_ti  = tn_ti + t_
+        # t_cum = torch.cumsum(st_x_[..., -1], -1)
+        # tn_ti = t_cum[..., -1:] - t_cum # t_n - t_i
+        # tn_ti = torch.cat((tn_ti, torch.zeros(1, config.num_points)), -1)
+        # t_ti  = tn_ti + t_
 
-        lamb_t = t_intensity(w_i_, b_i_, t_ti) / np.prod(scales)
+        # lamb_t = t_intensity(w_i_, b_i_, t_ti) / np.prod(scales)
 
         # Calculate spatial intensity
         N = len(s_grids) # number of grid points
 
         s_x_ = torch.cat((st_x_[..., :-1], background), 1).repeat(N, 1, 1)
         s_diff = s_grids.unsqueeze(1) - s_x_
-        lamb_s = s_intensity(w_i_.repeat(N, 1), b_i_.repeat(N, 1), t_ti.repeat(N, 1), 
-                             s_diff, inv_var_.repeat(N, 1, 1))
+        lamb_s = s_intensity(w_i_.repeat(N, 1), s_diff, inv_var_.repeat(N, 1, 1))
         #print(lamb_t)
         #print(torch.max(lamb_s))
         #print('-----------')
 
-        lamb = (lamb_s * lamb_t).view(x_nstep, y_nstep)
-        lambs.append(lamb.numpy())
+        
+        # lamb = (lamb_s * lamb_t).view(x_nstep, y_nstep)
+        # lambs.append(lamb.numpy())
 
+
+        
+        lamb_sp = lamb_s.view(x_nstep, y_nstep)
+        lambs.append(lamb_sp.numpy())
+        # show heatmap of lamb transposed
+        plt.imshow(lamb_sp.T.numpy(), origin='lower',extent=[0, 105, 0, 68])
+        # Add a white cross for st_y[i,:,:2]
+        # plt.scatter(st_y[i, :, 0], st_y[i, :, 1], c='white', marker='x')
+        # plt.scatter(st_x_[0, -1, 0], st_x_[0, -1, 1], c='black', marker='x')
+
+
+        plt.scatter(st_y_cum[i, :, 0], st_y_cum[i, :, 1], c='white', marker='x')
+        # Add black cross at last input st_x_cum[i,:,:2]
+        plt.scatter(st_x_cum[i, -1, 0], st_x_cum[i, -1, 1], c='black', marker='x')
+        # plt.xlim(0, 100)
+        # plt.ylim(0, 68)
+        plt.clf()
     x_range = x_range.numpy() * scales[0] + biases[0]
     y_range = y_range.numpy() * scales[1] + biases[1]
     t_range = t_range.numpy()

@@ -65,13 +65,13 @@ def eval_loss(model, test_loader, device):
     
     for index, data in enumerate(test_loader):
         st_x, st_y, _, _, _ = data
-        loss, sll, tll = model.loss(st_x, st_y)
+        loss, sll,tll = model.loss(st_x, st_y)
         
         loss_meter.update(loss.item())
         sll_meter.update(sll.mean())
         tll_meter.update(tll.mean())
         
-    return loss_meter.avg, sll_meter.avg, tll_meter.avg
+    return loss_meter.avg, sll_meter.avg , tll_meter.avg
 
 
 def eval_loss_rmtpp(model, test_loader, device):
@@ -143,6 +143,7 @@ def train(model, train_loader, val_loader, config, logger, device):
 
             model.optimizer.zero_grad()
             loss, sll, tll = model.loss(st_x, st_y)
+            # loss, sll = model.loss(st_x, st_y)
 
             if torch.isnan(loss):
                 print("Numerical error, quiting...")
@@ -160,12 +161,15 @@ def train(model, train_loader, val_loader, config, logger, device):
 
         logger.info("In epochs {} | "
                     "total loss: {:5f} | Space: {:5f} | Time: {:5f}".format(
+                     #   "total loss: {:5f} | Space: {:5f} ".format(
+
             epoch, loss_meter.avg, sll_meter.avg , tll_meter.avg
         ))
         if (epoch+1)%config.eval_epoch==0:
             print("Evaluate")
-            valloss, valspace, valtime = eval_loss(model, val_loader, device)
+            valloss, valspace,valtime = eval_loss(model, val_loader, device)
             logger.info("Val Loss {:5f} | Space: {:5f} | Time: {:5f}".format(valloss, valspace, valtime))
+            # logger.info("Val Loss {:5f} | Space: {:5f} ".format(valloss, valspace))
             if valloss < best_eval:
                 best_eval = valloss
                 best_model = copy.deepcopy(model)
